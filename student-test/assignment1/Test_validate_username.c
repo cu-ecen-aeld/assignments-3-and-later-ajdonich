@@ -15,8 +15,22 @@
 void test_validate_my_username()
 {
     /**
-     * TODO: Replace the line below with your code here as described above to verify your /conf/username.txt 
-     * config file and my_username() functions are setup properly
+     * Verify /conf/username.txt config file and my_username() functions are setup properly
      */
-    TEST_ASSERT_TRUE_MESSAGE(false,"AESD students, please fix me!");
+
+    // Fetch names
+    const char *hardname = my_username();
+    char *confname = malloc_username_from_conf_file(); 
+
+    // Construct error message
+    const char fmt[] = "'%s' from malloc_username_from_conf_file() NOT EQUAL TO '%s' from my_username()";
+    int sz = snprintf(NULL, 0, fmt, confname, hardname); // Call with NULL/0 to evaluate needed size
+    char message[sz + 1]; // note +1 for terminating null byte
+    snprintf(message, sizeof message, fmt, confname, hardname);
+
+    // Apply test
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(confname, hardname, message);
+    
+    // Free malloc'd memory
+    free(confname);
 }
