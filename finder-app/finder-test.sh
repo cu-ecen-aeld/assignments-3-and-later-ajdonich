@@ -30,6 +30,7 @@ MATCHSTR="The number of files are ${NUMFILES} and the number of matching lines a
 echo "Writing ${NUMFILES} files containing string ${WRITESTR} to ${WRITEDIR}"
 
 rm -rf "${WRITEDIR}"
+mkdir ${WRITEDIR}
 
 # create $WRITEDIR if not assignment1
 assignment=`cat ../conf/assignment.txt`
@@ -48,13 +49,14 @@ then
 		exit 1
 	fi
 fi
-#echo "Removing the old writer utility and compiling as a native application"
-#make clean
-#make
+
+# echo "Removing the old writer utility and compiling as a native application"
+make clean
+make #CROSS_COMPILE=aarch64-none-linux-gnu- 
 
 for i in $( seq 1 $NUMFILES)
 do
-	./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
 OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
