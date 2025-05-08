@@ -1,4 +1,11 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <syslog.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <fcntl.h>
+#include <errno.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -7,17 +14,88 @@
  *   either in invocation of the system() call, or if a non-zero return
  *   value was returned by the command issued in @param cmd.
 */
-bool do_system(const char *cmd)
-{
+bool do_system(const char *cmd) {
+    openlog(NULL, LOG_PID, LOG_USER);
+    int status = system(cmd);
+    if (cmd == NULL) {
+        syslog(LOG_DEBUG, "system(3), shell %s available:", status != 0 ? "IS" : "NOT");
+        return (status != 0);
+    } 
+    else if (status == -1) {
+        syslog(LOG_ERR, "ERROR in system(3): %m");
+        return false;
+    } 
+    else if (status == 127) {
+        syslog(LOG_ERR, "ERROR in system(3): could not invoke shell");
+        return false;
+    }
 
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
+    syslog(LOG_DEBUG, "system(%s) completed with exit code: %i", cmd, status);
+    closelog();
 
-    return true;
+    return (status == 0);
+}
+
+// Helper for do_exec (with outfd <= 0, does not redirect) or do_exec_redirect 
+bool forkexecwait(int count, char *command[], int outfd) {
+    int status;
+    pid_t child;
+    bool result = true;
+    switch (child = fork()) {
+    case -1:
+        // Fork failed
+        syslog(LOG_ERR, "ERROR in fork(2): %m");
+        result = false;
+        break;
+        
+    case 0:
+        // Child process
+        if (outfd > 0) {
+            // Redirect STDOUT and STDERR to outfd, then close(outfd)
+            if ((dup2(outfd, STDOUT_FILENO) == -1) || (dup2(outfd, STDERR_FILENO) == -1)){
+               syslog(LOG_ERR, "ERROR in dup2(2): %m");
+               result = false;
+               break;
+            }
+            close(outfd);
+        }
+
+        char cmdline[256];
+        strcpy(cmdline, command[0]);
+        for (int i=1; i<count; ++i) {
+            strcat(cmdline, " ");
+            strcat(cmdline, command[i]);
+        }
+        syslog(LOG_DEBUG, "execv(%s)", cmdline);
+        execv(command[0], command);
+
+        // Get to here only if execv failed. Must explicitly exit()
+        // with FAILURE to relay bad status to parent in waitpid(3p)
+        syslog(LOG_ERR, "ERROR in execv(3): %m");
+        closelog();
+        exit(errno);
+        break;
+
+    default:
+        // Parent process
+        if (waitpid(child, &status, WUNTRACED) == -1) {
+            syslog(LOG_ERR, "ERROR in waitpid(3p): %m");
+            result = false;
+        }
+        else if (WIFSIGNALED(status)) {
+            int signal = WTERMSIG(status);
+            syslog(LOG_ERR, "child killed by signal: %i (%s)", signal, strsignal(signal));
+            result = false;
+        }
+        else if (WIFEXITED(status)) {
+            int exitcode = WEXITSTATUS(status);
+            syslog(LOG_DEBUG, "child completed with exit code : %i", exitcode);
+            result = (exitcode == 0);
+        }
+        break;
+    }
+
+    return result;
 }
 
 /**
@@ -34,34 +112,21 @@ bool do_system(const char *cmd)
 *   by the command issued in @param arguments with the specified arguments.
 */
 
-bool do_exec(int count, ...)
-{
+bool do_exec(int count, ...) {
+    openlog(NULL, LOG_PID, LOG_USER);
+
     va_list args;
     va_start(args, count);
-    char * command[count+1];
-    int i;
-    for(i=0; i<count; i++)
-    {
-        command[i] = va_arg(args, char *);
-    }
+    char* command[count+1];
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+    for(int i=0; i<count; i++)
+        command[i] = va_arg(args, char*);
 
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
-
+    bool result = forkexecwait(count, command, -1);
     va_end(args);
+    closelog();
 
-    return true;
+    return result;
 }
 
 /**
@@ -69,31 +134,29 @@ bool do_exec(int count, ...)
 *   This file will be closed at completion of the function call.
 * All other parameters, see do_exec above
 */
-bool do_exec_redirect(const char *outputfile, int count, ...)
-{
+bool do_exec_redirect(const char *outputfile, int count, ...) {
+    openlog(NULL, LOG_PID, LOG_USER);
+    syslog(LOG_DEBUG, "STDOUT redirect to: %s", outputfile);
+
     va_list args;
     va_start(args, count);
     char * command[count+1];
-    int i;
-    for(i=0; i<count; i++)
-    {
-        command[i] = va_arg(args, char *);
-    }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+    for(int i=0; i<count; i++)
+        command[i] = va_arg(args, char *);
 
-
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
-
+    // Open output file and fork
+    bool result = true;
+    mode_t perms = S_IRUSR|S_IWUSR | S_IRGRP|S_IWGRP | S_IROTH|S_IWOTH;
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, perms);
+    if (fd != -1) result = forkexecwait(count, command, fd);
+    else {
+        syslog(LOG_ERR, "ERROR in open(%s): %m", outputfile);
+        result = false;
+    }   
     va_end(args);
+    closelog();
+    close(fd);
 
-    return true;
+    return result;
 }
