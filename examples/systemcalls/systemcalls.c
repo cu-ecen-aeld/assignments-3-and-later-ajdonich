@@ -47,15 +47,16 @@ bool forkexecwait(int count, char *command[], int outfd) {
         syslog(LOG_ERR, "ERROR in fork(2): %m");
         result = false;
         break;
-        
+
     case 0:
-        // Child process
+        // Child process. Note, must explicitly exit(FAIL) on 
+        // FAILURE to relay bad status to parent in waitpid(3p)
         if (outfd > 0) {
             // Redirect STDOUT and STDERR to outfd, then close(outfd)
             if ((dup2(outfd, STDOUT_FILENO) == -1) || (dup2(outfd, STDERR_FILENO) == -1)){
-               syslog(LOG_ERR, "ERROR in dup2(2): %m");
-               result = false;
-               break;
+                syslog(LOG_ERR, "ERROR in dup2(2): %m");
+                closelog();
+                exit(errno);
             }
             close(outfd);
         }
@@ -69,8 +70,7 @@ bool forkexecwait(int count, char *command[], int outfd) {
         syslog(LOG_DEBUG, "execv(%s)", cmdline);
         execv(command[0], command);
 
-        // Get to here only if execv failed. Must explicitly exit()
-        // with FAILURE to relay bad status to parent in waitpid(3p)
+        // Gets to here only if execv failed
         syslog(LOG_ERR, "ERROR in execv(3): %m");
         closelog();
         exit(errno);
