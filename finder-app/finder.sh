@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Set to 0/1 to disable/enable DEBUG logging 
 DEBUG=0
