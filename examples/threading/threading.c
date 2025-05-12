@@ -58,6 +58,7 @@ bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex,
 
     if (pthread_create(thread, NULL, threadfunc, (void*)param) != 0) {
         syslog(LOG_ERR, "ERROR in pthread_create(3): %m");
+        free((void*)param);
         return false;
     }
 
