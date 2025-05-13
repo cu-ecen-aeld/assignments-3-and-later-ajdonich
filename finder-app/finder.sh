@@ -21,20 +21,20 @@ fcount=0
 lncount=0
 for file in `find ${DIRECTORY}`; do
     if [ ! -d "${file}" ]; then
-        let fcount=fcount+1
+        fcount=$(($fcount+1))
 
         # Debug logging
         if [ ${DEBUG} -gt 0 ]; then
             lncnt=lncount
             echo "${fcount} ${file}" 
             grep ${EXPRESSION} ${file} | while read -r ln ; do
-                let lncnt=lncnt+1
+		lncnt=$(($lncnt+1))
                 echo "  ${lncnt} ${ln}"
             done
         fi
 
         lncnt=`grep ${EXPRESSION} ${file} | wc -l`
-        let lncount=lncount+lncnt
+        lncount=$(($lncount+$lncnt))
     fi
 done
 
