@@ -31,7 +31,7 @@ LineBuffer newLineBuffer() {
     lb.buffersz = BLKINIT;
     lb.data = (char *)malloc(BLKINIT);
     if (lb.data == NULL)
-        syslog(LOG_ERR, "ERROR in readLine::malloc(3): %m");
+        syslog(LOG_ERR, "ERROR in newLineBuffer::malloc(3): %m");
     
     return lb;
 }
@@ -41,13 +41,13 @@ int append(LineBuffer *self, char ch) {
         size_t dsize = self->buffersz * 2;
         void *dbuffer = realloc((void *)self->data, dsize);
         if (dbuffer == NULL) {
-            syslog(LOG_ERR, "ERROR in readLine::realloc(3): %m");
+            syslog(LOG_ERR, "ERROR in append::realloc(3): %m");
             return -1;
         }
         self->data = (char *)dbuffer;
         self->buffersz = dsize;
 
-        syslog(LOG_DEBUG, "realloc'd LineBuffer to %li bytes", self->buffersz);
+        syslog(LOG_DEBUG, "Realloc'd LineBuffer to %li bytes", self->buffersz);
     }
 
     self->data[self->index] = ch;
@@ -112,7 +112,7 @@ int becomeDaemon() {
     }
 
     pid_t dpid = getpid();
-    syslog(LOG_DEBUG, "Daemon tranformation complete to PID: %i => %i ", pid, dpid);
+    syslog(LOG_DEBUG, "Daemon tranformation complete (PID: %i => %i)", pid, dpid);
 
     // No other files should be open yet except syslog
     // Server listen port is bound should be inherited
@@ -248,7 +248,7 @@ int eventLoop(int fd, int sfd) {
         tv.tv_sec = 2;
         tv.tv_usec = 0;
 
-        // Select to prevent block on accept preventing SIGNAL deliveries
+        // Select to prevent block on accept preventing SIGINT/SIGTERM delivery
         if ((ready = select(sfd+1, &rfds, NULL, NULL, &tv)) == 0) continue;
         else if (ready == -1) {
             syslog(LOG_ERR, "ERROR in eventLoop::select(2): %m");
@@ -298,7 +298,10 @@ int eventLoop(int fd, int sfd) {
         syslog(LOG_DEBUG, "Closed connection from %s", ipaddr);
     }
 
-    if (_exitflag) syslog(LOG_DEBUG, "Caught signal, exiting");
+    if (_exitflag) { 
+        syslog(LOG_DEBUG, "Caught signal, exiting");
+        retstatus = 0;
+    }
     return retstatus;
 }
 
@@ -320,7 +323,6 @@ int main(int argc, char *argv[]) {
             break;
         default: /* '?' */
             printf("usage: aesdsocket [-d] [-k]\n");
-            syslog(LOG_ERR, "usage: aesdsocket [-d] [-k]");
             exit(EXIT_FAILURE);
         }
     }
@@ -336,27 +338,26 @@ int main(int argc, char *argv[]) {
         status = EXIT_FAILURE;
     }
     // Listen for clients
-    else if ((sfd = tcpListen()) == -1) { 
-        syslog(LOG_ERR, "ERROR in main::tcpListen");
+    else if ((sfd = tcpListen()) == -1) {
         status = EXIT_FAILURE;
     }
-
     // Fork to daemon only after binding listen port 
-    if (isdaemon && (becomeDaemon() == -1)) 
-        exit(EXIT_FAILURE);
-
+    else if (isdaemon && (becomeDaemon() == -1))  {
+        status = EXIT_FAILURE;
+    }
     // Open var tmp output file
-    if ((fd = open(VARFILE, O_CREAT|O_RDWR|O_APPEND, 0644)) == -1) { 
+    else if ((fd = open(VARFILE, O_CREAT|O_RDWR|O_APPEND, 0644)) == -1) { 
         syslog(LOG_ERR, "ERROR in main::open(%s) %m", VARFILE);
         status = EXIT_FAILURE;
     }
     // Loop forever
-    else if (eventLoop(fd, sfd) == -1) {
-        syslog(LOG_ERR, "ERROR in main::eventLoop");
+    else if (eventLoop(fd, sfd) == -1)  {
         status = EXIT_FAILURE;
     }
 
-    if (sfd != -1) close(sfd);
+    closelog(); 
+    if (sfd != -1) 
+        close(sfd);
     if (fd != -1) {
         close(fd);
         if (!keepvarfile && remove(VARFILE) == -1) {
@@ -364,7 +365,6 @@ int main(int argc, char *argv[]) {
             status = EXIT_FAILURE;
         }
     }
-    closelog(); 
     exit(status);
 }
 
