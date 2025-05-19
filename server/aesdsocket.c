@@ -117,7 +117,10 @@ int becomeDaemon() {
     // No other files should be open yet except syslog
     // Server listen port is bound should be inherited
 
-    chdir("/");
+    if (chdir("/") == -1) {
+        syslog(LOG_ERR, "ERROR in becomeDaemon::chdir(\"/\"): %m");
+        return -1;
+    }
     closelog();
     openlog(NULL, LOG_PID, LOG_USER);
     return 0;

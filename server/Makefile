@@ -8,7 +8,7 @@ CC := $(CROSS_COMPILE)gcc
 $(info CC=$(shell which $(CC)))
 endif
 
-all: clean $(TARGET)
+all: $(TARGET)
 
 $(TARGET) : $(OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) -o $(TARGET) $(LDFLAGS)

@@ -1,0 +1,51 @@
+#! /bin/sh
+
+### BEGIN INIT INFO
+# Provides:          aesdsocket
+# Short-Description: aesdsocket daemon
+# Description:       Init script for the aesdsocket daemon
+### END INIT INFO
+
+
+DAEMON=/usr/bin/aesdsocket
+NAME=$(basename ${DAEMON})
+
+if [ ! -x ${DAEMON} ]; then
+	echo "ERROR: no such executable file ${DAEMON}"
+	exit 1
+fi
+
+start() {
+	printf 'Starting %s: ' "${NAME}"
+	start-stop-daemon -S -n "${NAME}" -a "${DAEMON}" -- "-d"
+	[ $? -eq 0 ] && echo "OK" || echo "FAIL"
+}
+
+stop() {
+        printf 'Stopping %s: ' "${NAME}"
+        start-stop-daemon -K -n "${NAME}"
+	[ $? -eq 0 ] && echo "OK" || echo "FAIL"
+}
+
+restart() {
+	stop
+	start
+}
+
+
+case "$1" in
+  start)
+  	start
+	;;
+  stop)
+  	stop
+	;;
+  restart|reload)
+  	restart
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit $?
