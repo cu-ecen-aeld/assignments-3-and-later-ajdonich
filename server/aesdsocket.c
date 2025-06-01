@@ -1,75 +1,29 @@
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <netdb.h>
-#include <syslog.h>
-#include <string.h>
-#include <errno.h>
+#include "connthread.h"
+
 #include <fcntl.h>
-#include <unistd.h>
-#include <signal.h>
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <syslog.h>
+#include <sys/time.h>
+
 
 #define LPORT 9000
 #define BACKLOG 50
 #define VARFILE "/var/tmp/aesdsocketdata"
-#define BLKINIT 512
 
-// Global SIGINT/SIGTERM flag
-int _exitflag = 0;
-
-typedef struct {
-    size_t index;
-    size_t buffersz;
-    char *data;
-} LineBuffer;
-
-LineBuffer newLineBuffer() {
-    LineBuffer lb;
-    lb.index = 0;
-    lb.buffersz = BLKINIT;
-    lb.data = (char *)malloc(BLKINIT);
-    if (lb.data == NULL)
-        syslog(LOG_ERR, "ERROR in newLineBuffer::malloc(3): %m");
-    
-    return lb;
-}
-
-int append(LineBuffer *self, char ch) {
-    if ((self->index + 1) == self->buffersz) {
-        size_t dsize = self->buffersz * 2;
-        void *dbuffer = realloc((void *)self->data, dsize);
-        if (dbuffer == NULL) {
-            syslog(LOG_ERR, "ERROR in append::realloc(3): %m");
-            return -1;
-        }
-        self->data = (char *)dbuffer;
-        self->buffersz = dsize;
-
-        syslog(LOG_DEBUG, "Realloc'd LineBuffer to %li bytes", self->buffersz);
-    }
-
-    self->data[self->index] = ch;
-    self->data[self->index + 1] = '\0';
-    self->index += 1;
-    return 0;
-}
-
-void reset(LineBuffer *self) {
-    self->index = 0;
-}
-
-void destroy(LineBuffer *self) {
-    self->index = 0;
-    self->buffersz = 0;
-    if (self->data) free((void *)self->data);
-    self->data = NULL;
-}
+// Global signal handler flag
+volatile sig_atomic_t _exitflag = 0;  // SIGINT/SIGTERM
+volatile sig_atomic_t _timerflag = 0; // SIGALRM
 
 void exitSigHandler(int sig) {
-    _exitflag = (sig == SIGINT || sig == SIGTERM);
+    _exitflag = (_exitflag || sig == SIGINT || sig == SIGTERM);
 }
+
+void timerSigHandler(int sig) {
+    _timerflag = (sig == SIGALRM);
+}
+
 
 int becomeDaemon() {
     pid_t pid = getpid();
@@ -167,141 +121,126 @@ int tcpListen() {
     return sfd;
 }
 
-ssize_t readLine(int fd, LineBuffer *line) {
-    char ch;
-    reset(line);
-
-    while (1) {
-        ssize_t numRead = read(fd, &ch, 1);
-        if (numRead == -1) {
-            if (errno == EINTR) continue; // If just inturrupted, try again
-            syslog(LOG_ERR, "ERROR in readLine::read(%i): %m", fd);
-            return -1;
-        }
-        else if (numRead == 0) break; // EOF
-        else if (append(line, ch) == -1) return -1; // Append ch 
-        else if (ch == '\n') break; // EOL
+ConnThread *appendThread(ConnThread *head, ConnThread *ct) {
+    if (!head) head = ct;
+    else {
+        ConnThread *node = head;
+        while (node->next) node = node->next;
+        node->next = ct;
     }
-
-    syslog(LOG_DEBUG, "Read %li bytes", line->index);
-    return line->index;
+    return head;
 }
 
-ssize_t writeFile(int fd, LineBuffer *line) {    
-    ssize_t numWrite = write(fd, line->data, line->index);
-    if (numWrite == -1) syslog(LOG_ERR, "ERROR in writeFile::write(2): %m");
-    else syslog(LOG_DEBUG, "Wrote %li (of %li) bytes to %s", numWrite, line->index, VARFILE);
-    return numWrite;
+ConnThread *pruneDoneThreads(ConnThread *head) {
+    ConnThread *prv = NULL, *node = head;
+    int err, pcnt = 0;
+
+    while (node) {
+        ConnThread *nxt = node->next;
+        if (!node->_doneFlag) prv = node;
+        else {
+	    syslog(LOG_DEBUG, "Joining thread %i pruneDoneThreads", node->tid);
+            if ((err = pthread_join(node->thread, NULL)) != 0)
+                syslog(LOG_ERR, "ERROR in pruneDoneThreads::pthread_join(3): %s", strerror(err));
+
+            free(node);           
+            if (!prv) head = nxt;
+            else prv->next = nxt;
+            node = nxt;
+	    pcnt += 1;
+        }
+        node = nxt;
+    }
+
+    if (pcnt) syslog(LOG_DEBUG, "Pruned %i ConnThread nodes", pcnt);
+    return head;
 }
 
-ssize_t sendFile(int fd, int cfd) {
-    static size_t blkx8 = BLKINIT*8;
+ConnThread *termAllThreads(ConnThread *head) {
+    int err, pcnt = 0;
+    while (head) {
+        head->_exitflag = 1;
+	syslog(LOG_DEBUG, "Joining thread %i in termAllThreads", head->tid);
+        if ((err = pthread_join(head->thread, NULL)) != 0)
+            syslog(LOG_ERR, "ERROR in termAllThreads::pthread_join(3): %s", strerror(err));
 
-    // Seek to beginning of file
-    if (lseek(fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "ERROR in sendFile::lseek(%i): %m", fd);
-        return -1;
+        ConnThread *nxt = head->next;
+        free(head);
+        head = nxt;
+	pcnt += 1;
     }
 
-    ssize_t numRead;
-    size_t totalSent = 0;
-    size_t npackets = 0;
-    char block[blkx8];
-
-    while (1) {
-        // Read blocksz bytes from file
-        numRead = read(fd, (void *)block, blkx8);
-        if (numRead == -1) {
-            if (errno == EINTR) continue; // Just inturrupted
-            syslog(LOG_ERR, "ERROR in sendFile::read(%i): %m", fd);
-            return -1;
-        }
-        
-        if (numRead == 0) // EOF
-            break; 
-
-        // Send BLKINCR bytes to client
-        if (write(cfd, (void *)block, numRead) != numRead) {
-            syslog(LOG_ERR, "ERROR in sendFile::write(%i): %m", cfd);
-            return -1;
-        }
-        totalSent += numRead;
-        npackets += 1;
-    }
-
-    syslog(LOG_DEBUG, "Sent %zi bytes (%zi pkts) to client", totalSent, npackets);
-    return totalSent;
+    syslog(LOG_DEBUG, "Terminated %i ConnThread nodes", pcnt);
+    return NULL;
 }
 
 int eventLoop(int fd, int sfd) {
-    int retstatus = 0;
-    int cfd = -1;
-    size_t lsz;
-    ssize_t numSent;
-    char ipaddr[INET_ADDRSTRLEN];
+    ConnThread *head = NULL;
 
-    // Just selecting on sfd
+    int err;
     fd_set rfds;
     struct timeval tv;
-    int ready;
+    int retstatus = 0;
+
+    // Set 10 sec timestamp signal timer
+    struct itimerval tstampinv;
+    tstampinv.it_value.tv_sec = 10;
+    tstampinv.it_value.tv_usec = 0;
+    tstampinv.it_interval.tv_sec = 10;
+    tstampinv.it_interval.tv_usec = 0;
+    if (setitimer(ITIMER_REAL, &tstampinv, NULL) == -1) {
+        syslog(LOG_ERR, "ERROR in eventLoop::setitimer(2): %m");
+        return -1;
+    }
 
     while (!_exitflag) { 
         FD_ZERO(&rfds);
-        FD_SET(sfd, &rfds);    
-        tv.tv_sec = 2;
+        FD_SET(sfd, &rfds);
+        tv.tv_sec = 2; // select loop interval
         tv.tv_usec = 0;
-
-        // Select to prevent block on accept preventing SIGINT/SIGTERM delivery
-        if ((ready = select(sfd+1, &rfds, NULL, NULL, &tv)) == 0) continue;
-        else if (ready == -1) {
-            syslog(LOG_ERR, "ERROR in eventLoop::select(2): %m");
+        
+        // Select on listen socket to avoid blocking signal deliveries
+        int ready = select(sfd+1, &rfds, NULL, NULL, &tv);
+        if (ready == -1) {
+            if (_exitflag) break;
+            else if (!_timerflag) {
+                syslog(LOG_ERR, "ERROR in eventLoop::select(2): %m");
+                retstatus = -1;
+                break;
+            }
+        }
+        else if (ready) {
+            // Accept new client connection
+            ConnThread *ct = newConnThread(VARFILE);
+            socklen_t addrlen = sizeof(struct sockaddr_storage);
+            if ((ct->cfd = accept(sfd, (struct sockaddr *)&ct->claddr, &addrlen)) == -1) {
+                syslog(LOG_ERR, "ERROR in eventLoop::accept(2): %m");
+                retstatus = -1;
+                free(ct);
+                break;
+            }
+            // Create thread for new connection
+            else if ((err = pthread_create(&ct->thread, NULL, connThreadMain, ct)) != 0) {
+                syslog(LOG_ERR, "ERROR in eventLoop::pthread_create(3): %s", strerror(err));
+                retstatus = -1;
+                free(ct);
+                break;
+            }
+            else head = appendThread(head, ct);
+        }
+        
+        if (_timerflag && writeTimestamp(VARFILE) == -1) {
             retstatus = -1;
             break;
         }
+        _timerflag = 0;
 
-        // Accept new client connection
-        struct sockaddr_storage claddr;
-        socklen_t addrlen = sizeof(struct sockaddr_storage);
-        cfd = accept(sfd, (struct sockaddr *)&claddr, &addrlen);
-        if (cfd == -1) {
-            syslog(LOG_ERR, "ERROR in eventLoop::accept(2): %m");
-            retstatus = -1;
-            break;
-        }
-
-        // Get and log client info
-        const char *dst = inet_ntop(AF_INET, ((struct sockaddr *)&claddr)->sa_data, ipaddr, INET_ADDRSTRLEN);
-        syslog(LOG_DEBUG, "Accepted connection from %s", dst ? ipaddr : "0.0.0.0");
-        LineBuffer line = newLineBuffer();
-        retstatus = 0;
-
-        // Until EOF on cfd
-        while (1) {
-            // Read line from connection 
-            lsz = readLine(cfd, &line);
-            if (lsz == 0) break; // EOF
-            else if (lsz == -1) {
-                retstatus = -1;
-                break;
-            }
-            // Append line to VARFILE
-            else if (writeFile(fd, &line) != lsz) {
-                retstatus = -1;
-                break;
-            }
-            // Send entire VARFILE back to client
-            else if ((numSent = sendFile(fd, cfd)) == -1) {
-                retstatus = -1;
-                break;
-            }
-        }
-
-        close(cfd); 
-        destroy(&line);        
-        syslog(LOG_DEBUG, "Closed connection from %s", ipaddr);
+        // Prune every loop iteration
+	    head = pruneDoneThreads(head);
     }
 
     if (_exitflag) { 
+        head = termAllThreads(head);
         syslog(LOG_DEBUG, "Caught signal, exiting");
         retstatus = 0;
     }
@@ -333,11 +272,12 @@ int main(int argc, char *argv[]) {
     // Init syslog params
     openlog(NULL, LOG_PID, LOG_USER);
     remove(VARFILE); // In case -k was used previously
-
-    // Add signal handler for SIGINT/SIGTERM
+    
+    // Add signal handler for SIGINT/SIGTERM/SIGALRM
     if ((signal(SIGINT, exitSigHandler) == SIG_ERR) || 
-        (signal(SIGTERM, exitSigHandler) == SIG_ERR)) {
-        syslog(LOG_ERR, "ERROR in main::signal(SIGINT/SIGTERM): %m");
+        (signal(SIGTERM, exitSigHandler) == SIG_ERR) || 
+        (signal(SIGALRM, timerSigHandler) == SIG_ERR)) {
+        syslog(LOG_ERR, "ERROR in main::signal(SIGINT/SIGTERM/SIGALRM): %m");
         status = EXIT_FAILURE;
     }
     // Listen for clients
@@ -348,26 +288,14 @@ int main(int argc, char *argv[]) {
     else if (isdaemon && (becomeDaemon() == -1))  {
         status = EXIT_FAILURE;
     }
-    // Open var tmp output file
-    else if ((fd = open(VARFILE, O_CREAT|O_RDWR|O_APPEND, 0644)) == -1) { 
-        syslog(LOG_ERR, "ERROR in main::open(%s) %m", VARFILE);
-        status = EXIT_FAILURE;
-    }
     // Loop forever
     else if (eventLoop(fd, sfd) == -1)  {
         status = EXIT_FAILURE;
     }
 
     closelog(); 
-    if (sfd != -1) 
-        close(sfd);
-    if (fd != -1) {
-        close(fd);
-        if (!keepvarfile && remove(VARFILE) == -1) {
-            syslog(LOG_ERR, "ERROR in main::remove(%s) %m", VARFILE);
-            status = EXIT_FAILURE;
-        }
-    }
+    if (sfd != -1) close(sfd);
+    if (!keepvarfile) remove(VARFILE);
     exit(status);
 }
 
