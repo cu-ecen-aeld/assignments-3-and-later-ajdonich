@@ -1,10 +1,10 @@
 SRC := connthread.c aesdsocket.c 
-TARGET = aesdsocket
 OBJS := $(SRC:.c=.o)
-CFLAGS := -g -Wall -Werror
+TARGET ?= aesdsocket
+CFLAGS ?= -g -Wall -Werror
 
 ifdef CROSS_COMPILE
-CC := $(CROSS_COMPILE)gcc
+CC ?= $(CROSS_COMPILE)gcc
 $(info CC=$(shell which $(CC)))
 endif
 

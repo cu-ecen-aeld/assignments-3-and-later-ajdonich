@@ -65,9 +65,6 @@ int becomeDaemon() {
         return -1;
     }
 
-    pid_t dpid = getpid();
-    syslog(LOG_DEBUG, "Daemon tranformation complete (PID: %i => %i)", pid, dpid);
-
     // No other files should be open yet except syslog
     // Server listen port is bound should be inherited
 
@@ -77,6 +74,7 @@ int becomeDaemon() {
     }
     closelog();
     openlog(NULL, LOG_PID, LOG_USER);
+    syslog(LOG_DEBUG, "Daemon tranformation complete (PID: %i => %i)", pid, getpid());
     return 0;
 }
 

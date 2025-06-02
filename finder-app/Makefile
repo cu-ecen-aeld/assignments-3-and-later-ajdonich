@@ -1,9 +1,9 @@
 SRC := writer.c
-TARGET = writer
 OBJS := $(SRC:.c=.o)
+TARGET ?= writer
 
 ifdef CROSS_COMPILE
-CC := $(CROSS_COMPILE)gcc
+CC ?= $(CROSS_COMPILE)gcc
 $(info "Overwriting CC=$(CC)")
 endif
 
