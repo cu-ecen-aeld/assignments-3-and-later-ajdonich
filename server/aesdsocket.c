@@ -7,7 +7,6 @@
 #include <syslog.h>
 #include <sys/time.h>
 
-
 #define LPORT 9000
 #define BACKLOG 50
 #define VARFILE "/var/tmp/aesdsocketdata"
@@ -23,7 +22,6 @@ void exitSigHandler(int sig) {
 void timerSigHandler(int sig) {
     _timerflag = (sig == SIGALRM);
 }
-
 
 int becomeDaemon() {
     pid_t pid = getpid();
@@ -137,15 +135,14 @@ ConnThread *pruneDoneThreads(ConnThread *head) {
         ConnThread *nxt = node->next;
         if (!node->_doneFlag) prv = node;
         else {
-	    syslog(LOG_DEBUG, "Joining thread %i pruneDoneThreads", node->tid);
+            syslog(LOG_DEBUG, "Joining thread %i in pruneDoneThreads", node->tid);
             if ((err = pthread_join(node->thread, NULL)) != 0)
                 syslog(LOG_ERR, "ERROR in pruneDoneThreads::pthread_join(3): %s", strerror(err));
 
             free(node);           
             if (!prv) head = nxt;
             else prv->next = nxt;
-            node = nxt;
-	    pcnt += 1;
+            pcnt += 1;
         }
         node = nxt;
     }
@@ -158,14 +155,14 @@ ConnThread *termAllThreads(ConnThread *head) {
     int err, pcnt = 0;
     while (head) {
         head->_exitflag = 1;
-	syslog(LOG_DEBUG, "Joining thread %i in termAllThreads", head->tid);
+        syslog(LOG_DEBUG, "Joining thread %i in termAllThreads", head->tid);
         if ((err = pthread_join(head->thread, NULL)) != 0)
             syslog(LOG_ERR, "ERROR in termAllThreads::pthread_join(3): %s", strerror(err));
 
         ConnThread *nxt = head->next;
         free(head);
         head = nxt;
-	pcnt += 1;
+        pcnt += 1;
     }
 
     syslog(LOG_DEBUG, "Terminated %i ConnThread nodes", pcnt);
@@ -227,14 +224,14 @@ int eventLoop(int fd, int sfd) {
             else head = appendThread(head, ct);
         }
         
-        if (_timerflag && writeTimestamp(VARFILE) == -1) {
+        // Write timestamp to VARFILE if timer expired
+        if (_timerflag && !(_timerflag = 0) && writeTimestamp(VARFILE) == -1) {
             retstatus = -1;
             break;
         }
-        _timerflag = 0;
 
         // Prune every loop iteration
-	    head = pruneDoneThreads(head);
+        head = pruneDoneThreads(head);
     }
 
     if (_exitflag) { 
