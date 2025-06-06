@@ -8,31 +8,30 @@
  *
  */
 
+#include "aesd-circular-buffer.h"
+
 #ifdef __KERNEL__
 #include <linux/kern_levels.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
-#define free kfree
-#define syslog printk
 #define LOG_ERR KERN_ERR
 #define LOG_DEBUG KERN_DEBUG
+#define mem_free(ptr) kfree(ptr)
+#define mem_allocate(size) kmalloc(size, GFP_KERNEL)
+#define log_msg(typ, ...) printk(typ, __VA_ARGS__)
+
 #else
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+
+#define mem_free(ptr) free(ptr)
+#define mem_allocate(size) malloc(size)
+#define log_msg(typ, ...) syslog(typ, __VA_ARGS__)
 #endif
 
-#include "aesd-circular-buffer.h"
-
-void *mem_allocate(size_t size) {
-#ifdef __KERNEL__
-    return kmalloc(size, GFP_KERNEL);
-#else
-    return malloc(size);
-#endif
-}
 
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
@@ -50,10 +49,10 @@ size_t char_offset, size_t *entry_offset_byte_rtn ) {
     uint8_t sz = ((MAXSZ + (buffer->in_offs - buffer->out_offs)) % MAXSZ);
     if (sz == 0 && buffer->full) sz = MAXSZ;
 
-    // Iterate buffer, decrimenting char_offset until appropriate entry reached
+    // Iterate buffer, decrementing char_offset until appropriate entry reached
     for (uint8_t i=0, j=buffer->out_offs; i < sz; i++, j = ((j+1) % MAXSZ)) {
-        if ((ssize_t)char_offset - (ssize_t)buffer->entry[j].size < 0) {
-            syslog(LOG_DEBUG, "Found '%s' at pos %u offset %li in find_entry_offset_for_fpos", 
+        if (char_offset < buffer->entry[j].size) {
+            log_msg(LOG_DEBUG, "Found '%s' at pos %u offset %li in find_entry_offset_for_fpos", 
                 buffer->entry[j].buffptr, j, char_offset);
 
             *entry_offset_byte_rtn = char_offset;
@@ -77,7 +76,7 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     // Allocate a new entry buffer (w/terminating null byte)
     char *buffptr = (char *)mem_allocate(add_entry->size + 1);
     if (buffptr == NULL) {
-        syslog(LOG_ERR, "ERROR in aesd_circular_buffer_add_entry::mem_allocate");
+        log_msg(LOG_ERR, "ERROR in aesd_circular_buffer_add_entry::mem_allocate");
         return;
     }
     memcpy(buffptr, add_entry->buffptr, add_entry->size);
@@ -85,15 +84,15 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 
     // If full, free and incr head first
     if (buffer->full) {
-        syslog(LOG_DEBUG, "Deallocating entry at pos %u in buffer_add_entry", buffer->out_offs);
-        free((void*)buffer->entry[buffer->out_offs].buffptr);
+        log_msg(LOG_DEBUG, "Deallocating entry at pos %u in buffer_add_entry", buffer->out_offs);
+        mem_free((void*)buffer->entry[buffer->out_offs].buffptr);
         buffer->out_offs = (buffer->out_offs + 1) % MAXSZ;
     }
 
     // Set fields to write entry 
     buffer->entry[buffer->in_offs].size = add_entry->size;
     buffer->entry[buffer->in_offs].buffptr = (const char *)buffptr;
-    syslog(LOG_DEBUG, "Adding '%s' at pos %u in buffer_add_entry", 
+    log_msg(LOG_DEBUG, "Adding '%s' at pos %u in buffer_add_entry", 
         buffer->entry[buffer->in_offs].buffptr, buffer->in_offs);
     
     // Incr tail and set full flag
