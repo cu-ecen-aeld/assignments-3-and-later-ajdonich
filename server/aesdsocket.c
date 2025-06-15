@@ -9,18 +9,27 @@
 
 #define LPORT 9000
 #define BACKLOG 50
-#define VARFILE "/var/tmp/aesdsocketdata"
 
-// Global signal handler flag
+// Uncomment to use aeschar device backend
+// Comment out to use regular var file backend
+#define USE_AESD_CHAR_DEVICE 1 
+
+#ifndef USE_AESD_CHAR_DEVICE
+#define BACKEND "/var/tmp/aesdsocketdata"
+#else
+#define BACKEND "/dev/aesdchar"
+#endif
+
+// Global signal handler flags
 volatile sig_atomic_t _exitflag = 0;  // SIGINT/SIGTERM
 volatile sig_atomic_t _timerflag = 0; // SIGALRM
 
 void exitSigHandler(int sig) {
-    _exitflag = (_exitflag || sig == SIGINT || sig == SIGTERM);
+    if (sig == SIGINT || sig == SIGTERM) _exitflag = 1;
 }
 
 void timerSigHandler(int sig) {
-    _timerflag = (sig == SIGALRM);
+    if (sig == SIGALRM) _timerflag = 1;
 }
 
 int becomeDaemon() {
@@ -177,6 +186,7 @@ int eventLoop(int fd, int sfd) {
     struct timeval tv;
     int retstatus = 0;
 
+    #ifndef USE_AESD_CHAR_DEVICE
     // Set 10 sec timestamp signal timer
     struct itimerval tstampinv;
     tstampinv.it_value.tv_sec = 10;
@@ -187,6 +197,7 @@ int eventLoop(int fd, int sfd) {
         syslog(LOG_ERR, "ERROR in eventLoop::setitimer(2): %m");
         return -1;
     }
+    #endif
 
     while (!_exitflag) { 
         FD_ZERO(&rfds);
@@ -206,7 +217,7 @@ int eventLoop(int fd, int sfd) {
         }
         else if (ready) {
             // Accept new client connection
-            ConnThread *ct = newConnThread(VARFILE);
+            ConnThread *ct = newConnThread(BACKEND);
             socklen_t addrlen = sizeof(struct sockaddr_storage);
             if ((ct->cfd = accept(sfd, (struct sockaddr *)&ct->claddr, &addrlen)) == -1) {
                 syslog(LOG_ERR, "ERROR in eventLoop::accept(2): %m");
@@ -223,12 +234,14 @@ int eventLoop(int fd, int sfd) {
             }
             else head = appendThread(head, ct);
         }
-        
-        // Write timestamp to VARFILE if timer expired
-        if (_timerflag && !(_timerflag = 0) && writeTimestamp(VARFILE) == -1) {
+
+        #ifndef USE_AESD_CHAR_DEVICE
+        // Write timestamp to BACKEND if timer expired
+        if (_timerflag && !(_timerflag = 0) && writeTimestamp(BACKEND) == -1) {
             retstatus = -1;
             break;
         }
+        #endif
 
         // Prune every loop iteration
         head = pruneDoneThreads(head);
@@ -245,7 +258,7 @@ int eventLoop(int fd, int sfd) {
 int main(int argc, char *argv[]) {
     int opt;
     int isdaemon = 0;
-    int keepvarfile = 0;
+    int keepbackend = 0;
     int fd = -1, sfd = -1;
     int status = EXIT_SUCCESS;
 
@@ -256,7 +269,7 @@ int main(int argc, char *argv[]) {
             isdaemon = 1;
             break;
         case 'k':
-            keepvarfile = 1;
+            keepbackend = 1;
             break;
         default: /* '?' */
             printf("usage: aesdsocket [-d] [-k]\n");
@@ -266,7 +279,10 @@ int main(int argc, char *argv[]) {
     
     // Init syslog params
     openlog(NULL, LOG_PID, LOG_USER);
-    remove(VARFILE); // In case -k was used previously
+
+    #ifndef USE_AESD_CHAR_DEVICE
+    remove(BACKEND); // In case -k was used previously
+    #endif
     
     // Add signal handler for SIGINT/SIGTERM/SIGALRM
     if ((signal(SIGINT, exitSigHandler) == SIG_ERR) || 
@@ -290,7 +306,9 @@ int main(int argc, char *argv[]) {
 
     closelog(); 
     if (sfd != -1) close(sfd);
-    if (!keepvarfile) remove(VARFILE);
+    #ifndef USE_AESD_CHAR_DEVICE
+    if (!keepbackend) remove(BACKEND);
+    #endif
     exit(status);
 }
 

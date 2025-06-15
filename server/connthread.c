@@ -7,7 +7,7 @@
 
 #define BLKINIT 512
 
-static pthread_mutex_t varFileLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t backendLock = PTHREAD_MUTEX_INITIALIZER;
 
 
 LineBuffer newLineBuffer() {
@@ -52,7 +52,7 @@ void destroy(LineBuffer *self) {
     self->data = NULL;
 }
 
-ConnThread *newConnThread(const char *varfile) {
+ConnThread *newConnThread(const char *backend) {
     static unsigned int _tid_generator = 1;
 
     ConnThread *ct = (ConnThread *)malloc(sizeof(ConnThread));
@@ -62,7 +62,7 @@ ConnThread *newConnThread(const char *varfile) {
     }
 
     ct->cfd = -1;
-    ct->varfile = varfile;
+    ct->backend = backend;
     ct->tid = _tid_generator++;
     ct->_exitflag = 0;
     ct->_doneFlag = 0;
@@ -92,32 +92,35 @@ ssize_t readLine(ConnThread *self, LineBuffer *line) {
 
 ssize_t writeFile(ConnThread *self, LineBuffer *line) {    
     int err, fd = -1;
-    if ((fd = open(self->varfile, O_CREAT|O_WRONLY|O_APPEND, 0644)) == -1) { 
-        syslog(LOG_ERR, "ERROR in writeFile::open(%s) %m", self->varfile);
+    if ((fd = open(self->backend, O_CREAT|O_WRONLY|O_APPEND, 0644)) == -1) { 
+        syslog(LOG_ERR, "ERROR in writeFile::open(%s) %m", self->backend);
         return -1;
     }
 
-    // Obtain VARFILE lock
-    if ((err = pthread_mutex_lock(&varFileLock)) != 0) {
+    // Obtain BACKEND lock
+    if ((err = pthread_mutex_lock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in writeFile::pthread_mutex_lock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
     
     ssize_t numWrite = write(fd, line->data, line->index);
     if (numWrite == -1) syslog(LOG_ERR, "ERROR in writeFile::write(2): %m");
     else syslog(LOG_DEBUG, "[TID: %i] Wrote %li (of %li) bytes to %s", 
-        self->tid, numWrite, line->index, self->varfile);
+        self->tid, numWrite, line->index, self->backend);
     
-    // Release VARFILE lock
-    if ((err = pthread_mutex_unlock(&varFileLock)) != 0) {
+    // Release BACKEND lock
+    if ((err = pthread_mutex_unlock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in writeFile::pthread_mutex_unlock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
     
+    close(fd);
     return numWrite;
 }
 
-ssize_t writeTimestamp(const char *varfile) {    
+ssize_t writeTimestamp(const char *backend) {    
     static char timestamp[64];
 
     struct tm *lt;
@@ -132,28 +135,31 @@ ssize_t writeTimestamp(const char *varfile) {
     }
 
     int err, fd = -1;
-    if ((fd = open(varfile, O_CREAT|O_WRONLY|O_APPEND, 0644)) == -1) { 
-        syslog(LOG_ERR, "ERROR in writeTimestamp::open(%s) %m", varfile);
+    if ((fd = open(backend, O_CREAT|O_WRONLY|O_APPEND, 0644)) == -1) { 
+        syslog(LOG_ERR, "ERROR in writeTimestamp::open(%s) %m", backend);
         return -1;
     }
 
-    // Obtain VARFILE lock
-    if ((err = pthread_mutex_lock(&varFileLock)) != 0) {
+    // Obtain BACKEND lock
+    if ((err = pthread_mutex_lock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in writeTimestamp::pthread_mutex_lock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
 
     size_t slen = strlen(timestamp);
     ssize_t numWrite = write(fd, timestamp, slen);
     if (numWrite == -1) syslog(LOG_ERR, "ERROR in writeTimestamp::write(2): %m");
-    else syslog(LOG_DEBUG, "Wrote \'%s\' (%li of %li bytes) to %s", timestamp, numWrite, slen, varfile);
+    else syslog(LOG_DEBUG, "Wrote \'%s\' (%li of %li bytes) to %s", timestamp, numWrite, slen, backend);
     
-    // Release VARFILE lock
-    if ((err = pthread_mutex_unlock(&varFileLock)) != 0) {
+    // Release BACKEND lock
+    if ((err = pthread_mutex_unlock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in writeTimestamp::pthread_mutex_unlock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
-    
+
+    close(fd);
     return numWrite;
 }
 
@@ -161,14 +167,15 @@ ssize_t sendFile(ConnThread *self) {
     static size_t blkx8 = BLKINIT*8;
     
     int err, fd = -1;
-    if ((fd = open(self->varfile, O_RDONLY)) == -1) { 
-        syslog(LOG_ERR, "ERROR in sendFile::open(%s) %m", self->varfile);
+    if ((fd = open(self->backend, O_RDONLY)) == -1) { 
+        syslog(LOG_ERR, "ERROR in sendFile::open(%s) %m", self->backend);
         return -1;
     }
 
-    // Obtain VARFILE lock
-    if ((err = pthread_mutex_lock(&varFileLock)) != 0) {
+    // Obtain BACKEND lock
+    if ((err = pthread_mutex_lock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in sendFile::pthread_mutex_lock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
 
@@ -200,12 +207,14 @@ ssize_t sendFile(ConnThread *self) {
         }
     }
 
-    // Release VARFILE lock
-    if ((err = pthread_mutex_unlock(&varFileLock)) != 0) {
+    // Release BACKEND lock
+    if ((err = pthread_mutex_unlock(&backendLock)) != 0) {
         syslog(LOG_ERR, "ERROR in sendFile::pthread_mutex_unlock(3p): %s", strerror(err));
+        close(fd);
         return -1;
     }
 
+    close(fd);
     syslog(LOG_DEBUG, "[TID: %i] Sent %zi bytes (%zi pkts) to client", self->tid, totalSent, npackets);
     return totalSent;
 }
@@ -223,7 +232,7 @@ void *connThreadMain(void *vself) {
     LineBuffer line = newLineBuffer();
 
     // Until EOF on cfd, read line from connection, append
-    // it to VARFILE, send entire VARFILE back to client
+    // it to BACKEND, send entire BACKEND back to client
     while (!self->_exitflag) {
         if ((lsz = readLine(self, &line)) == 0) break; // EOF
         else if (lsz == -1) break; // Read ERROR

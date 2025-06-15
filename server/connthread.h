@@ -29,14 +29,14 @@ void destroy(LineBuffer *self);
 /* 
     Main ConnThread struct for TCP-connection-per-thread design.
     Maintains all data needed by thread and fcns to read/write 
-    TCP connections and VARFILE and exit/done communication.
+    TCP connections and BACKEND and exit/done communication.
     Also maintains *next pointer for use in Singly Linked List.
 */
 typedef struct ConnThread ConnThread;
 
 struct ConnThread {
     int cfd; 
-    const char *varfile;
+    const char *backend;
     unsigned int tid;
     pthread_t thread;
     struct sockaddr_storage claddr;
@@ -47,10 +47,10 @@ struct ConnThread {
     ConnThread *next;
 };
 
-ConnThread *newConnThread(const char *varfile);
+ConnThread *newConnThread(const char *backend);
 ssize_t readLine(ConnThread *self, LineBuffer *line);
 ssize_t writeFile(ConnThread *self, LineBuffer *line);   
-ssize_t writeTimestamp(const char *varfile);
+ssize_t writeTimestamp(const char *backend);
 ssize_t sendFile(ConnThread *self);
 void *connThreadMain(void *vself);
 
