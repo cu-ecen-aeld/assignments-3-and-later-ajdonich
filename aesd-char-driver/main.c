@@ -12,6 +12,7 @@
  */
 
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 
 #include <linux/uaccess.h>
 #include <linux/fs.h> // file_operations
@@ -135,11 +136,77 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     return (ssize_t)ncopy;
 }
 
+loff_t aesd_lseek(struct file *filp, loff_t off, int whence) {
+	loff_t newpos;
+
+    // Lock read and write of f_pos to guarantee atomic update
+    if (mutex_lock_interruptible(&aesd_device.lock) < 0) {
+        printk(KERN_WARNING "[EINTR] in aesd_lseek::mutex_lock_interruptible\n");
+        return -EINTR;
+    }
+
+	switch(whence) {
+    case 0: /* SEEK_SET */
+        newpos = off;
+        break;
+
+    case 1: /* SEEK_CUR */
+        newpos = filp->f_pos + off;
+        break;
+
+    case 2: /* SEEK_END */
+        newpos = append_offset + off;
+        break;
+
+    default: /* can't happen from lseek(2) */
+        mutex_unlock(&aesd_device.lock);
+        return -EINVAL;
+	}
+
+	if (newpos < 0) {
+        mutex_unlock(&aesd_device.lock);
+        printk(KERN_ERR "[EINVAL] in aesd_lseek, whence: %i, loff: %lli\n", whence, off);
+        return -EINVAL;
+    }
+
+	filp->f_pos = newpos;
+    mutex_unlock(&aesd_device.lock);
+    PDEBUG("set f_pos: %lli in aesd_lseek\n", filp->f_pos);
+    return newpos;
+
+
+}
+
+// Read ioctl command from user space and apply the requested lpos offset
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+    struct aesd_seekto seekobj;
+    loff_t offset;
+
+	// Validate cmd is the one we recognize
+	if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC || _IOC_NR(cmd) > AESDCHAR_IOC_MAXNR || cmd != AESDCHAR_IOCSEEKTO) {
+        printk(KERN_ERR "[ENOTTY] in aesd_ioctl\n");
+        return -ENOTTY;
+    }
+    else if (__copy_from_user((void *)&seekobj, (const void __user *)arg, sizeof(struct aesd_seekto)) != 0) {
+        printk(KERN_ERR "[EFAULT] in aesd_ioctl::__copy_from_user\n");
+        return -EFAULT; 
+    }
+    else if ((offset = _get_loffset(&aesd_device.cbuffer, seekobj.write_cmd, seekobj.write_cmd_offset)) == -1) {
+        printk(KERN_ERR "[EINVAL] in aesd_ioctl::_set_loffset\n");
+        return -EINVAL;
+    }
+    else if ((offset = aesd_lseek(filp, offset, SEEK_SET)) < 0) return offset;
+    PDEBUG("set entry_offset: %u, char_offset: %u in aesd_ioctl\n", seekobj.write_cmd, seekobj.write_cmd_offset);
+	return 0;
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
+    .llseek  =  aesd_lseek,
+    .unlocked_ioctl = aesd_ioctl,
     .release =  aesd_release,
 };
 

@@ -3,7 +3,11 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <regex.h>
+#include <string.h>
+#include <sys/ioctl.h>
 #include <syslog.h>
+#include <unistd.h>
 
 #define BLKINIT 512
 
@@ -62,6 +66,7 @@ ConnThread *newConnThread(const char *backend) {
     }
 
     ct->cfd = -1;
+    ct->fd = -1;
     ct->backend = backend;
     ct->tid = _tid_generator++;
     ct->_exitflag = 0;
@@ -90,33 +95,12 @@ ssize_t readLine(ConnThread *self, LineBuffer *line) {
     return line->index;
 }
 
-ssize_t writeFile(ConnThread *self, LineBuffer *line) {    
-    int err, fd = -1;
-    if ((fd = open(self->backend, O_CREAT|O_WRONLY|O_APPEND, 0644)) == -1) { 
-        syslog(LOG_ERR, "ERROR in writeFile::open(%s) %m", self->backend);
-        return -1;
-    }
-
-    // Obtain BACKEND lock
-    if ((err = pthread_mutex_lock(&backendLock)) != 0) {
-        syslog(LOG_ERR, "ERROR in writeFile::pthread_mutex_lock(3p): %s", strerror(err));
-        close(fd);
-        return -1;
-    }
-    
-    ssize_t numWrite = write(fd, line->data, line->index);
+ssize_t writeFile(ConnThread *self, LineBuffer *line) {
+    ssize_t numWrite = write(self->fd, line->data, line->index);
     if (numWrite == -1) syslog(LOG_ERR, "ERROR in writeFile::write(2): %m");
     else syslog(LOG_DEBUG, "[TID: %i] Wrote %li (of %li) bytes to %s", 
         self->tid, numWrite, line->index, self->backend);
-    
-    // Release BACKEND lock
-    if ((err = pthread_mutex_unlock(&backendLock)) != 0) {
-        syslog(LOG_ERR, "ERROR in writeFile::pthread_mutex_unlock(3p): %s", strerror(err));
-        close(fd);
-        return -1;
-    }
-    
-    close(fd);
+
     return numWrite;
 }
 
@@ -163,33 +147,26 @@ ssize_t writeTimestamp(const char *backend) {
     return numWrite;
 }
 
-ssize_t sendFile(ConnThread *self) {
+ssize_t sendFile(ConnThread *self, int whence) {
     static size_t blkx8 = BLKINIT*8;
     
-    int err, fd = -1;
-    if ((fd = open(self->backend, O_RDONLY)) == -1) { 
-        syslog(LOG_ERR, "ERROR in sendFile::open(%s) %m", self->backend);
-        return -1;
-    }
-
-    // Obtain BACKEND lock
-    if ((err = pthread_mutex_lock(&backendLock)) != 0) {
-        syslog(LOG_ERR, "ERROR in sendFile::pthread_mutex_lock(3p): %s", strerror(err));
-        close(fd);
-        return -1;
-    }
-
     ssize_t numRead, numWrit;
     ssize_t totalSent = 0;
     ssize_t npackets = 0;
     char block[blkx8];
 
+    // Offset always 0, really just to enable seek to beginning of backend
+    // (for send after write) or to leave at SET_CUR (for send after ioctl)
+    if (lseek(self->fd, 0, whence) == -1) {
+        syslog(LOG_ERR, "ERROR in sendFile::lseek(%i): %m", self->fd);
+        return -1;
+    }
+
     while (1) {
         // Read blkx8 bytes from file
-        numRead = read(fd, (void *)block, blkx8);
-        if (numRead == -1) {
+        if ((numRead = read(self->fd, (void *)block, blkx8)) == -1) {
             if (errno == EINTR) continue; // Just inturrupted
-            syslog(LOG_ERR, "ERROR in sendFile::read(%i): %m", fd);
+            syslog(LOG_ERR, "ERROR in sendFile::read(%i): %m", self->fd);
             break;
         }
         
@@ -207,16 +184,70 @@ ssize_t sendFile(ConnThread *self) {
         }
     }
 
-    // Release BACKEND lock
-    if ((err = pthread_mutex_unlock(&backendLock)) != 0) {
-        syslog(LOG_ERR, "ERROR in sendFile::pthread_mutex_unlock(3p): %s", strerror(err));
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
     syslog(LOG_DEBUG, "[TID: %i] Sent %zi bytes (%zi pkts) to client", self->tid, totalSent, npackets);
     return totalSent;
+}
+
+int acquireBackend(ConnThread *self) {
+    int err = -1;
+    if ((self->fd = open(self->backend, O_CREAT|O_RDWR|O_APPEND, 0644)) == -1) {
+        syslog(LOG_ERR, "ERROR in acquireBackend::open(%s) %m", self->backend);
+    }
+    else if ((err = pthread_mutex_lock(&backendLock)) != 0) {
+        syslog(LOG_ERR, "ERROR in acquireBackend::pthread_mutex_lock(3p): %s", strerror(err));
+        close(self->fd);
+        self->fd = -1;
+    }
+
+    return err;
+}
+
+int releaseBackend(ConnThread *self) {
+    int err;
+    if ((err = pthread_mutex_unlock(&backendLock)) != 0)
+        syslog(LOG_ERR, "ERROR in releaseBackend::pthread_mutex_unlock(3p): %s", strerror(err));
+    
+    close(self->fd);
+    self->fd = -1;
+    return err;  
+}
+
+// This ioctl command translates to a backend lseek call to 
+// the offset corresponding to the aesd_seekto object params
+int sendIoctl(ConnThread *self, struct aesd_seekto *pSeekObj) {
+    int err;
+    if ((err = ioctl(self->fd, AESDCHAR_IOCSEEKTO, pSeekObj)) == -1) 
+        syslog(LOG_ERR, "ERROR in sendIoctl::ioctl(2): %m");
+    else syslog(LOG_DEBUG, "[TID: %i] Sent ioctl obj [%u, %u] to %s", self->tid, 
+        pSeekObj->write_cmd, pSeekObj->write_cmd_offset, self->backend);
+    
+    return err;
+}
+
+// Extracts ioctl aesd_seekto object if line matches: AESDCHAR_IOCSEEKTO:X,Y
+int matchIoctl(ConnThread *self, LineBuffer *line, struct aesd_seekto *pSeekObj) {
+    regex_t regex;
+    regmatch_t groups[3];
+    char digit[64];
+    size_t n;
+
+    regcomp(&regex, "^AESDCHAR_IOCSEEKTO:([0-9]+),([0-9]+)", REG_EXTENDED);      
+    if (regexec(&regex, line->data, 3, groups, 0) == REG_NOMATCH) return 0;
+
+    // Populate aesd_seekto object
+    n = groups[1].rm_eo - groups[1].rm_so;
+    memset((void *)digit, 0, n+1); // Ensure final '\0'
+    stpncpy(digit, &line->data[groups[1].rm_so], n);
+    pSeekObj->write_cmd = (uint32_t)atoi((const char *)digit);
+
+    n = groups[2].rm_eo - groups[2].rm_so;
+    memset((void *)digit, 0, n+1); // Ensure final '\0'
+    stpncpy(digit, &line->data[groups[2].rm_so], n);
+    pSeekObj->write_cmd_offset = (uint32_t)atoi((const char *)digit);
+
+    syslog(LOG_DEBUG, "[TID: %i] Extracted aesd_seekto obj: [%u, %u]", 
+        self->tid, pSeekObj->write_cmd, pSeekObj->write_cmd_offset);
+    return 1;
 }
 
 void *connThreadMain(void *vself) {
@@ -227,21 +258,35 @@ void *connThreadMain(void *vself) {
     const char *dst = inet_ntop(AF_INET, ((struct sockaddr *)&self->claddr)->sa_data, ipaddr, INET_ADDRSTRLEN);
     syslog(LOG_DEBUG, "[TID: %i] Accepted connection from %s", self->tid, dst ? ipaddr : "0.0.0.0");
 
+    int isioctl;
     size_t lsz;
     ssize_t numSent;
+    struct aesd_seekto seekObj;
     LineBuffer line = newLineBuffer();
-
-    // Until EOF on cfd, read line from connection, append
-    // it to BACKEND, send entire BACKEND back to client
+    
+    // Until EOF on cfd, read lines from connection
     while (!self->_exitflag) {
         if ((lsz = readLine(self, &line)) == 0) break; // EOF
         else if (lsz == -1) break; // Read ERROR
-        else if (writeFile(self, &line) != lsz) break; // Write ERROR
-        else if ((numSent = sendFile(self)) == -1) break; // Send ERROR
+        else if (acquireBackend(self) != 0)  break; // Open/lock backend ERROR
+
+        // If ioctl cmd line, send back content only from new lseek offset
+        if (matchIoctl(self, &line, &seekObj)) {
+            if (sendIoctl(self, &seekObj) == -1) break; // Ioctl ERROR
+            else if ((numSent = sendFile(self, SEEK_CUR)) == -1) break; // Send ERROR
+            else if (releaseBackend(self) != 0) break; // Close/unlock backend ERROR
+        }
+        // If standard line, write it to backend and send back entire content  
+        else {
+            if (writeFile(self, &line) != lsz) break; // Write ERROR
+            else if ((numSent = sendFile(self, SEEK_SET)) == -1) break; // Send ERROR
+            else if (releaseBackend(self) != 0) break; // Close/unlock backend ERROR
+        }
     }
     
     destroy(&line);
-    close(self->cfd); 
+    close(self->cfd);
+    if (self->fd != -1) releaseBackend(self);
     syslog(LOG_DEBUG, "[TID: %i] Closed connection from %s", self->tid, ipaddr);
     self->_doneFlag = 1;
     return vself;

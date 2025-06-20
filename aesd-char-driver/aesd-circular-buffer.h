@@ -11,9 +11,10 @@
 #ifdef __KERNEL__
 #include <linux/types.h>
 #else
+#include <stdbool.h>
 #include <stddef.h> // size_t
 #include <stdint.h> // uintx_t
-#include <stdbool.h>
+#include <sys/types.h> // ssize_t
 #endif
 
 #define AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED 10
@@ -61,8 +62,9 @@ extern void aesd_circular_buffer_init(struct aesd_circular_buffer *buffer);
 
 extern void aesd_circular_buffer_cleanup(struct aesd_circular_buffer *buffer);
 
-extern size_t _read_count_for_fpos(struct aesd_circular_buffer *buffer,
-    char *output, size_t count, size_t char_offset);
+extern size_t _read_count_for_fpos(struct aesd_circular_buffer *buffer, char *output, size_t count, size_t char_offset);
+
+extern ssize_t _get_loffset(struct aesd_circular_buffer *buffer, size_t entry_offset, size_t char_offset);
 
 /**
  * Create a for loop to iterate over each member of the circular buffer.

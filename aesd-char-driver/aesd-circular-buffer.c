@@ -77,7 +77,7 @@ size_t char_offset, size_t *entry_offset_byte_rtn ) {
 // concatenates the circular buffer entries from that point forward and writes result into char *output param
 size_t _read_count_for_fpos(struct aesd_circular_buffer *buffer, char *output, size_t count, size_t char_offset) {
     uint8_t i, j, sz;
-    ssize_t ic = 0;
+    size_t ic = 0;
 
     // Evaluate number of elements in circular buffer
     sz = ((MAXSZ + (buffer->in_offs - buffer->out_offs)) % MAXSZ);
@@ -100,6 +100,27 @@ size_t _read_count_for_fpos(struct aesd_circular_buffer *buffer, char *output, s
 
     return ic;
 }
+
+// Returns the byte offset into buffer start given an entry_offset and (entry_)char_offset
+ssize_t _get_loffset(struct aesd_circular_buffer *buffer, size_t entry_offset, size_t char_offset) {
+    uint8_t i, j, sz;
+    ssize_t lpos = 0;
+
+    // Evaluate number of elements in circular buffer
+    sz = ((MAXSZ + (buffer->in_offs - buffer->out_offs)) % MAXSZ);
+    if (sz == 0 && buffer->full) sz = MAXSZ;
+    if (entry_offset >= sz) return -1;
+
+    // Iterate buffer, incrementing lpos until appropriate offset
+    for (i=0, j=buffer->out_offs; i <= entry_offset; i++, j = ((j+1) % MAXSZ)) {
+        if (i < entry_offset) lpos += buffer->entry[j].size;
+        else if (char_offset >= buffer->entry[j].size) return -1;
+        else lpos += char_offset;
+    }
+    
+    return lpos;
+}
+
 
 /**
 * Adds entry @param add_entry to @param buffer in the location specified in buffer->in_offs.

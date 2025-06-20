@@ -1,6 +1,8 @@
 #ifndef CONNTHREAD_H
 #define CONNTHREAD_H
 
+#include "../aesd-char-driver/aesd_ioctl.h"
+
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -35,7 +37,7 @@ void destroy(LineBuffer *self);
 typedef struct ConnThread ConnThread;
 
 struct ConnThread {
-    int cfd; 
+    int cfd, fd;
     const char *backend;
     unsigned int tid;
     pthread_t thread;
@@ -49,9 +51,14 @@ struct ConnThread {
 
 ConnThread *newConnThread(const char *backend);
 ssize_t readLine(ConnThread *self, LineBuffer *line);
-ssize_t writeFile(ConnThread *self, LineBuffer *line);   
+ssize_t writeFile(ConnThread *self, LineBuffer *line);
 ssize_t writeTimestamp(const char *backend);
-ssize_t sendFile(ConnThread *self);
+ssize_t sendFile(ConnThread *self, int whence);
 void *connThreadMain(void *vself);
+
+int acquireBackend(ConnThread *self);
+int releaseBackend(ConnThread *self);
+int sendIoctl(ConnThread *self, struct aesd_seekto *pSeekObj);
+int matchIoctl(ConnThread *self, LineBuffer *line, struct aesd_seekto *pSeekObj);
 
 #endif /* CONNTHREAD_H */
